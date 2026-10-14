@@ -1,0 +1,28 @@
+Reason: Dreamcast: WARP=stage,scenario boots past the title screen into an area
+--- a/src/System/Application.cpp
++++ b/src/System/Application.cpp
+@@ -768,6 +768,24 @@
+ 			}
+ 		}
+ 
++#ifdef TARGET_DC
++		// Makefile.dc WARP=stage,scenario: after the logos, straight into that
++		// area on a fresh game (with one Shine, so Delfino Plaza is open), no movies.
++		static bool port_warped;
++		if (!port_warped && SMS_DC_WARP_STAGE >= 0
++		    && (nextState == APP_STATE_DONE || nextState == APP_STATE_MOVIE || nextState == APP_STATE_TITLE
++		        || nextState == APP_STATE_MENU)) {
++			port_warped = true;
++			TFlagManager::getInstance()->setFlag(0x40000, 1);
++			// the arrival movies (checkAdditionalMovie) count as seen
++			for (u32 f = 0x30009; f <= 0x3000D; f++)
++				TFlagManager::getInstance()->setBool(true, f);
++			mNextArea.set(SMS_DC_WARP_STAGE, SMS_DC_WARP_SCENARIO, 0);
++			nextState = APP_STATE_GAMEPLAY;
++			OSReport("WARP: stage %d scenario %d\n", SMS_DC_WARP_STAGE, SMS_DC_WARP_SCENARIO);
++		}
++#endif
++
+ #ifdef TARGET_PC
+ 		// BetterSunshineEngine (isLevelSelectAvailable, retail 0x802A6794):
+ 		// the `stb r30, 0x8(r31)` storing the next state becomes a call; the

@@ -39,6 +39,9 @@ extern "C" void port_os_init(void)
 #ifdef _WIN32
 	localtime_s(&lt, &now);
 	s64 local = (s64)_mkgmtime(&lt) - 946684800LL;
+#elif defined(_arch_dreamcast)
+	// The Dreamcast's clock keeps local time.
+	s64 local = (s64)now - 946684800LL;
 #else
 	localtime_r(&now, &lt);
 	s64 local = (s64)now + lt.tm_gmtoff - 946684800LL;

@@ -267,6 +267,9 @@ void switch_to(OSThread* self, OSThread* next, bool exiting)
 #else
 		pthread_attr_setstack(&a, ls->base, kLowStackSize);
 #endif
+#elif defined(_arch_dreamcast)
+		pthread_attr_setstacksize(&a, 256 << 10);  // 32 MiB in all: GameCube stacks were far smaller
+		pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
 #else
 		pthread_attr_setstacksize(&a, 1 << 20);
 		pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);

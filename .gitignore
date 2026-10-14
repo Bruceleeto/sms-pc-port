@@ -12,3 +12,8 @@
 /mods/*
 !/mods/README.md
 __pycache__/
+# Extracted disc (make assets).
+/game/
+# Dreamcast build output (Makefile.dc).
+/sms.elf
+/sms.cdi

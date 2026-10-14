@@ -1,0 +1,196 @@
+# Super Mario Sunshine for the Dreamcast (KallistiOS)
+#
+#   make -f Makefile.dc -j6        build sms.elf
+#   make -f Makefile.dc cdi        sms.cdi with the game from game/ (make assets first)
+#   make -f Makefile.dc run        sms.cdi in flycast
+#   make -f Makefile.dc clean      delete build/dc, sms.elf, sms.cdi
+#
+# Options (make -f Makefile.dc AUDIO=1 ...):
+#   AUDIO=0   no sound: the game gets an empty sound table (default)
+#   MOVIES=0  no THP movies: each one ends as it starts (default)
+#   MEM_MB=18 the game heap (MEM1) in MiB; 18 fits Flycast's 32 MB RAM mod
+#   OPT=-O2   optimisation for the game code
+#   WARP=1,0  boot past the title into stage,scenario (1,0 Delfino Plaza;
+#             2 Bianco Hills, 3 Ricco Harbor, 4 Gelato Beach, ...); WARP= for the title
+#
+# Needs KallistiOS (KOS_BASE, default /opt/toolchains/dc/kos); draws with its pvr API
+# The game sources and decomp-patches/ are the PC build's; dreamcast/
+# holds what replaces the PC's platform pieces.
+
+KOS_BASE ?= /opt/toolchains/dc/kos
+KOS_ENV  := $(KOS_BASE)/environ.sh
+ifeq ($(wildcard $(KOS_ENV)),)
+$(error KallistiOS not found: set KOS_BASE (no $(KOS_ENV)))
+endif
+# KallistiOS's settings, read once from its environ.sh.
+kos = $(shell bash -c '. $(KOS_ENV) >/dev/null 2>&1; printf "%s" "$$$(1)"')
+KOS_CC_BASE := $(call kos,KOS_CC_BASE)
+KOS_CFLAGS  := $(call kos,KOS_CFLAGS)
+KOS_LDFLAGS := $(call kos,KOS_LDFLAGS)
+KOS_LIBS    := $(call kos,KOS_LIBS)
+KOS_ARCH_DIR := $(call kos,KOS_ARCH_DIR)
+
+CC  := $(KOS_CC_BASE)/bin/sh-elf-gcc
+CXX := $(KOS_CC_BASE)/bin/sh-elf-g++
+
+.DEFAULT_GOAL := all
+
+AUDIO  ?= 0
+MOVIES ?= 0
+MEM_MB ?= 18
+WARP   ?= 1,0
+OPT    ?= -O2
+
+BUILD  := build/dc
+TARGET := sms.elf
+GAME   := game
+
+# KOS's code-generation flags without its optimisation choices: no LTO (600
+# units) and no fast or fused maths (the port rounds as the Gekko does).
+KOS_ARCH_FLAGS := $(filter-out -O% -flto% -ffat-lto-objects -fipa-pta -ffast-math -ffp-contract=% -Wall -g \
+	-fomit-frame-pointer -freorder-blocks-algorithm=%,$(KOS_CFLAGS))
+LDFLAGS := $(filter-out -O% -flto% -ffat-lto-objects -fipa-pta -ffast-math -ffp-contract=% -Wall,$(KOS_LDFLAGS))
+
+comma := ,
+DEFS := -DGEKKO -DTARGET_PC -DTARGET_DC -DVERSION_GMSE01 -DBUILD_VERSION=2 -DNDEBUG=1 \
+	-DSMS_DC_AUDIO=$(AUDIO) -DSMS_DC_MOVIES=$(MOVIES) -DSMS_DC_MEM_MB=$(MEM_MB) \
+	-DSMS_DC_WARP_STAGE=$(or $(word 1,$(subst $(comma), ,$(WARP))),-1) \
+	-DSMS_DC_WARP_SCENARIO=$(or $(word 2,$(subst $(comma), ,$(WARP))),0)
+
+DECOMP_INC := include libs/dolphin/include libs/JSystem/include libs/THPPlayer/include \
+	libs/PowerPC_EABI_Support/include libs/TRK_MINNOW_DOLPHIN/include libs/OdemuExi2/include
+
+# prep.py applies decomp-patches/ and lists the game units (GAME_CXX, GAME_C,
+# GAME_PCH, PATCHED) here; make rereads it after it is remade.
+include $(BUILD)/sources.mk
+$(BUILD)/sources.mk: dreamcast/prep.py $(wildcard decomp-patches/*.patch dreamcast/patches/*.patch) decomp/configure.py
+	python3 dreamcast/prep.py $(BUILD)
+
+GAME_INC := -Idreamcast/include -Iplatform/gx/port_include -Iplatform/gx/include -Isrc/port_include \
+	$(addprefix -I$(PATCHED)/,$(DECOMP_INC)) $(addprefix -Idecomp/,$(DECOMP_INC))
+GAME_FLAGS := $(OPT) -g $(KOS_ARCH_FLAGS) $(DEFS) -w -fno-strict-aliasing -fwrapv -ffp-contract=off \
+	-finput-charset=UTF-8 -fexec-charset=CP932 -include src/port_compat.h
+GAME_CXXFLAGS := $(GAME_FLAGS) -std=gnu++03 -fno-gnu-keywords -fpermissive -fno-threadsafe-statics
+GAME_CFLAGS   := $(GAME_FLAGS) -std=gnu99 -fcommon
+
+# C units: the game's own .c files, the SDK's pad clamp and THP decoders.
+GAME_CSRCS := $(GAME_C) decomp/libs/dolphin/src/pad/Padclamp.c
+# the save state menu is game code (CMakeLists.txt)
+GAME_CXX += src/savestate_menu.cpp
+ifeq ($(MOVIES),1)
+GAME_CSRCS += $(PATCHED)/libs/dolphin/src/thp/THPDec.c $(PATCHED)/libs/dolphin/src/thp/THPAudio.c
+endif
+GAME_OBJS := $(patsubst %,$(BUILD)/%.o,$(GAME_CXX) $(GAME_CSRCS))
+
+# --- Platform layer: the PC's, less what dreamcast/ replaces -----------------
+PLAT_SRCS := $(filter-out \
+	platform/port_runtime.cpp platform/port_host.cpp \
+	platform/pad/pad.cpp platform/ar/ar.cpp platform/audio/ai.cpp platform/audio/dsp_hle.cpp platform/audio/dsp_mixer.cpp \
+	platform/trace/% platform/os/windows_stack.cpp platform/os/windows_crash.cpp platform/os/crash_info.cpp platform/misc/sdk_stubs_windows.cpp platform/misc/window_icon.cpp \
+	platform/thp/% platform/mods/eclipse/% platform/gx/%, \
+	$(shell find platform -not -path '*/tests/*' \( -name '*.cpp' -o -name '*.c' \)))
+PLAT_SRCS += src/port_main.cpp src/lbl_80004600_darwin.c \
+	$(filter-out dreamcast/gx_dc.cpp,$(wildcard dreamcast/*.cpp dreamcast/*.c))
+
+# --- Graphics: the GX register model and vertex loader, drawn by dreamcast/gx_dc.cpp
+GX_SRCS := platform/gx/src/gx_api.cpp platform/gx/src/gx_fifo.cpp platform/gx/src/gx_vert.cpp dreamcast/gx_dc.cpp
+GD_SRCS := $(addprefix decomp/libs/dolphin/src/gd/,GDBase.c GDGeometry.c GDLight.c GDPixel.c GDTev.c GDTransform.c)
+GX_INC  := -Idreamcast/include -Iplatform/gx/include -Iplatform/gx/src -Iplatform/gx/port_include -Isrc/port_include \
+	-Idecomp/include -Idecomp/libs/dolphin/include -Isrc
+GX_FLAGS := $(OPT) -g $(KOS_ARCH_FLAGS) -fno-strict-aliasing -ffp-contract=off
+GX_OBJS := $(patsubst %,$(BUILD)/gx/%.o,$(GX_SRCS) $(GD_SRCS))
+
+$(BUILD)/gx/%.cpp.o: %.cpp
+	@mkdir -p $(dir $@)
+	@echo "  CXX  $<"
+	@$(CXX) $(GX_FLAGS) -std=gnu++17 $(GX_INC) -MMD -MP -c $< -o $@
+
+$(BUILD)/gx/%.c.o: %.c
+	@mkdir -p $(dir $@)
+	@echo "  CC   $<"
+	@$(CC) $(GX_FLAGS) -include platform/gx/src/gd_host_prefix.h -w -fcommon $(GX_INC) -MMD -MP -c $< -o $@
+
+PLAT_INC := -Idreamcast/include -Iplatform -Iplatform/mods/include -Isrc -Isrc/port_include \
+	$(addprefix -Idecomp/,$(DECOMP_INC)) -Iplatform/gx/include
+PLAT_FLAGS := $(OPT) -g $(KOS_ARCH_FLAGS) $(DEFS) -fno-strict-aliasing -Wno-unused-parameter \
+	-include dreamcast/include/dc_host.h
+PLAT_OBJS := $(patsubst %,$(BUILD)/plat/%.o,$(PLAT_SRCS))
+
+$(BUILD)/plat/%.cpp.o: %.cpp
+	@mkdir -p $(dir $@)
+	@echo "  CXX  $<"
+	@$(CXX) $(PLAT_FLAGS) -std=gnu++17 $(PLAT_INC) -MMD -MP -c $< -o $@
+
+$(BUILD)/plat/%.c.o: %.c
+	@mkdir -p $(dir $@)
+	@echo "  CC   $<"
+	@$(CC) $(PLAT_FLAGS) -std=gnu11 $(PLAT_INC) -MMD -MP -c $< -o $@
+
+all: $(TARGET)
+
+# The game's global operator new/delete allocate from JKR heaps: renamed in
+# the game's objects so libstdc++, KallistiOS and the platform layer keep the
+# C library's allocator (as on PC).
+$(BUILD)/libsms_game.a: $(GAME_OBJS)
+	@echo "  AR   $@"
+	@rm -f $@
+	@$(KOS_CC_BASE)/bin/sh-elf-ar rcs $@ $(GAME_OBJS)
+	@printf '%s\n' '__Znwj __sms_game_new' '__Znaj __sms_game_new_array' '__ZdlPv __sms_game_delete' \
+		'__ZdaPv __sms_game_delete_array' > $(BUILD)/game_new_syms.txt
+	@$(KOS_CC_BASE)/bin/sh-elf-objcopy --redefine-syms=$(BUILD)/game_new_syms.txt $@
+
+$(TARGET): $(BUILD)/libsms_game.a $(PLAT_OBJS) $(GX_OBJS)
+	@echo "  LD   $@"
+	@$(CXX) $(LDFLAGS) $(PLAT_OBJS) $(GX_OBJS) \
+		-Wl,--whole-archive $(BUILD)/libsms_game.a -Wl,--no-whole-archive \
+		-Wl,--wrap=fopen -lpthread -lstdc++ $(KOS_LIBS) -Wl,-Map,$(BUILD)/sms.map -o $@
+
+# JSystem and THPPlayer .c files are C++, as their MWCC libraries built them.
+$(BUILD)/%.cpp.o: %.cpp
+	@mkdir -p $(dir $@)
+	@echo "  CXX  $<"
+	@$(CXX) $(GAME_CXXFLAGS) $(GAME_INC) $(if $(filter $<,$(GAME_PCH)),-include decomp/include/SMS.pch) -MMD -MP -c $< -o $@
+
+$(BUILD)/%.c.o: %.c
+	@mkdir -p $(dir $@)
+	@echo "  CC   $<"
+	@$(if $(filter $<,$(GAME_CSRCS)),$(CC) $(GAME_CFLAGS),$(CXX) -x c++ $(GAME_CXXFLAGS)) \
+		$(GAME_INC) -MMD -MP -c $< -o $@
+
+# --- Disc image ---------------------------------------------------------------
+# The CD holds /sys and /files as make assets extracted them (hard links, no
+# copies). MOVIES=0 keeps only each .thp's first 64 KiB: the game still
+# reads a movie's header before it skips it, and the CD is 280 MB, not 1.1 GB.
+CD := $(BUILD)/cd
+CDI := sms.cdi
+FLYCAST ?= flycast
+
+$(CD)/stamp: $(GAME)/sys/fst.bin Makefile.dc
+	@test -f $(GAME)/sys/fst.bin || { echo "no $(GAME)/: run make assets first"; exit 1; }
+	@echo "  CD   $(CD)"
+	@rm -rf $(CD) && mkdir -p $(CD)
+	@cp -al $(GAME)/sys $(GAME)/files $(CD)/ 2>/dev/null || cp -a $(GAME)/sys $(GAME)/files $(CD)/
+ifneq ($(MOVIES),1)
+	@find $(CD)/files -iname '*.thp' | while read f; do \
+		head -c 65536 "$$f" > "$$f.tmp" && rm -f "$$f" && mv "$$f.tmp" "$$f"; done
+endif
+	@touch $@
+
+$(CDI): $(TARGET) $(CD)/stamp
+	@echo "  CDI  $@"
+	@mkdcdisc -q -e $(TARGET) -d $(CD)/sys -d $(CD)/files -n "Super Mario Sunshine" -a "sms-pc-port" -o $@
+
+cdi: $(CDI)
+
+run: $(CDI)
+	$(FLYCAST) -config Dreamcast:RamMod32MB=yes $(abspath $(CDI))
+
+game: $(GAME_OBJS)
+plat: $(PLAT_OBJS)
+
+clean:
+	rm -rf $(BUILD) $(TARGET) sms.bin sms.cdi
+
+.PHONY: all cdi run game plat clean
+
+-include $(GAME_OBJS:.o=.d) $(PLAT_OBJS:.o=.d) $(GX_OBJS:.o=.d)
